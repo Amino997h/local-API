@@ -4,6 +4,12 @@
 
 ---
 
+> [!NOTE]
+> **ملاحظة هامة حول الخصوصية والاستقلالية (Self-Hosted):**  
+> هذا المشروع هو سيرفر محلي مستقل وخاص لكل مستخدم. عندما يقوم أي شخص باستنساخ هذا المستودع وتثبيته على جهازه، سينشئ **سيرفره الخاص وحسابه الخاص في ChatGPT ونفقه المستقل**. لن يستخدم أحد حسابك أو سيرفرك أو بياناتك الخاصة على الإطلاق.
+
+---
+
 ## 📋 المتطلبات الأساسية (Prerequisites)
 
 - **نظام التشغيل**: Windows 10 / 11
@@ -16,7 +22,7 @@
 
 ### الخطوة 1: استنساخ المستودع (Clone Repository)
 ```bash
-git clone https://github.com/YOUR_USERNAME/local-API.git
+git clone https://github.com/Amino997h/local-API.git
 cd local-API
 ```
 
@@ -55,12 +61,12 @@ python main.py
 لربط السيرفر بمواقع خارجيّة عبر إنترنت برابط ثابت دائم:
 
 1. قم بإنشاء حساب مجاني على موقع [Ngrok](https://dashboard.ngrok.com/signup).
-2. احصل على **Authtoken** وقم بتسجيله:
+2. احصل على **Authtoken** الخاص بك وقم بتسجيله:
    ```bash
    ngrok config add-authtoken YOUR_AUTHTOKEN
    ```
 3. احصل على رابطك الثابت المجاني من تبويب **Domains** (مثال: `your-domain.ngrok-free.dev`).
-4. قم بتشغيل النفق بالرابط الثابت:
+4. قم بتشغيل النفق برابطك الثابت:
    ```bash
    ngrok http --url=your-domain.ngrok-free.dev 8008
    ```
@@ -69,10 +75,10 @@ python main.py
 
 ## 🔑 4. بيانات الربط بالمواقع والإضافات الخارجية
 
-عند ربط السيرفر بـ WordPress أو TypingMind أو أي تطبيق آخر، استخدم البيانات التالية:
+عند ربط السيرفر بـ WordPress أو TypingMind أو أي تطبيق آخر، استخدم البيانات التالية الخاصة بك:
 
 - **API Base URL**: `https://your-domain.ngrok-free.dev/v1`
-- **API Key**: `sk-chatgpt-local-secret-key` *(المحدد في `config.py`)*
+- **API Key**: `sk-chatgpt-local-secret-key` *(المحدد في `config.py` ويمكنك تغييره)*
 - **Model**: `gpt-4o`
 
 ---
