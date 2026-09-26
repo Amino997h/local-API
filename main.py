@@ -103,6 +103,66 @@ app = FastAPI(
 )
 
 
+def format_clean_prompt(messages: List[ChatMessage]) -> str:
+    """
+    تنسيق البرومبت بذكاء عالي:
+    1. تصفية كليشات الحماية وسياسات النظام المكررة.
+    2. عدم تكرار محادثات Assistant السابقة (لأن ChatGPT يحتفظ بها في المتصفح).
+    3. إرسال الرسالة الحالية للمستخدم مسبوقة بالتاريخ فقط إن وجد.
+    """
+    if not messages:
+        return ""
+
+    if len(messages) == 1:
+        content = messages[0].content or ""
+        if isinstance(content, list):
+            content = "\n".join([p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"])
+        return str(content).strip()
+
+    latest_user_text = ""
+    date_context = ""
+
+    for msg in reversed(messages):
+        content = msg.content or ""
+        if isinstance(content, list):
+            content = "\n".join([p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"])
+        content_str = str(content)
+
+        if msg.role == "user" and not latest_user_text:
+            clean_text = content_str
+            
+            # إزالة وسوم بيانات المصادر غير الموثوقة الكثيفة إن وجدت
+            if "<<<UNTRUSTED_SOURCE_DATA>>>" in clean_text:
+                parts = clean_text.split("<<<END_UNTRUSTED_SOURCE_DATA>>>")
+                clean_text = parts[-1] if len(parts) > 1 else clean_text
+
+            # استخراج التاريخ إن وجد
+            if "[Context — current date/time" in content_str:
+                lines = clean_text.split("\n")
+                date_lines = [l.strip() for l in lines if "Today is" in l or "User local time" in l]
+                if date_lines:
+                    date_context = " | ".join(date_lines)
+                
+                # استخراج آخر سطر نصي غير فارغ يعبر عن طلب المستخدم
+                non_empty = [l.strip() for l in lines if l.strip() and not l.strip().startswith("#") and not l.strip().startswith("[Context")]
+                if non_empty:
+                    clean_text = non_empty[-1]
+
+            latest_user_text = clean_text.strip()
+            if latest_user_text:
+                break
+
+    parts = []
+    if date_context:
+        parts.append(f"[{date_context}]")
+    if latest_user_text:
+        parts.append(latest_user_text)
+    else:
+        parts.append(str(messages[-1].content or "").strip())
+
+    return "\n".join(parts)
+
+
 @app.get("/health", tags=["Health"])
 async def health_check():
     """فحص حالة السيرفر والمحرك."""
@@ -149,31 +209,18 @@ async def create_chat_completion(
 ):
     """
     نقطة النهاية الرئيسية المحاكية لـ OpenAI Chat Completions.
-    تتلقى الرسائل وتدمج السياق الكامل ثم ترسله إلى ChatGPT وتسترجع الرد.
-    تكتشف الطلبات التلقائية الثانوية مثل (توليد العنوان واستخراج الذاكرة) وتُجيب عليها فوراً بـ 0ms محلياً.
+    تتلقى الرسائل وتفلتر الكليشات المكررة ثم ترسل الرسالة الحالية بنظافة لـ ChatGPT.
+    تكتشف الطلبات التلقائية الثانوية وتجيب عليها فوراً بـ 0ms محلياً.
     """
     if not request.messages:
         raise HTTPException(status_code=400, detail="مصفوفة الرسائل messages لا يمكن أن تكون فارغة.")
 
-    # تجميع جميع الرسائل في برومبت موحد
-    formatted_parts = []
-    for msg in request.messages:
-        content = msg.content
-        if isinstance(content, list):
-            content = "\n".join([p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"])
-        elif content is None:
-            content = ""
-            
-        if len(request.messages) == 1:
-            formatted_parts.append(str(content))
-        else:
-            formatted_parts.append(f"[{msg.role.upper()}]:\n{content}")
-
-    full_prompt = "\n\n".join(formatted_parts)
-    full_prompt_lower = full_prompt.lower()
-
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
     created_timestamp = int(time.time())
+
+    # تجميع وتنظيف النص بالكامل عبر format_clean_prompt
+    full_prompt = format_clean_prompt(request.messages)
+    full_prompt_lower = full_prompt.lower()
 
     # ⚡ 1. رصد طلبات تسمية شريط المحادثة التلقائية (Auto-Title Generation)
     if "generate a short title" in full_prompt_lower or "generate a title" in full_prompt_lower:
@@ -190,9 +237,9 @@ async def create_chat_completion(
         logger.info("⚡ رصد طلب تلقائي لاستخراج الذاكرة (Memory Extraction Request) - إرجاع '[]' محلياً بـ 0ms بدون إرساله لـ ChatGPT.")
         reply_text = "[]"
 
-    # 🚀 3. الطلب الحقيقي الموجه لـ ChatGPT
+    # 🚀 3. الطلب النظيف الموجه لـ ChatGPT
     else:
-        logger.info(f"استلام طلب جيل جديد ({len(request.messages)} رسائل، Stream={request.stream}). البرومبت: '{full_prompt[:80]}...'")
+        logger.info(f"استلام طلب جيل جديد ({len(request.messages)} رسائل، Stream={request.stream}). البرومبت النظيف: '{full_prompt}'")
 
         try:
             reply_text = await engine.generate_chat_response(full_prompt)
