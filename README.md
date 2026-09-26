@@ -1,12 +1,13 @@
 # Personal OpenAI-Compatible ChatGPT Local API Server 🚀
 
-سيرفر محلي متكامل ومرن يحوّل أتمتة Playwright لموقع ChatGPT إلى API متوافق 100% مع واجهة برمجة تطبيقات **OpenAI** المعيارية (`POST /v1/chat/completions`).
+سيرفر محلي متكامل ومرن يحوّل أتمتة Playwright لموقع ChatGPT إلى API متوافق 100% مع واجهة برمجة تطبيقات **OpenAI** المعيارية (`POST /v1/chat/completions`)، مدمج مع **ملف باتش آلي (Batch File - `Start_ChatGPT_API.bat`)** لتشغيل كافة الخدمات بضغطة زر واحدة دون الحاجة لإعادة تنفيذ أية أوامر يدوية مستقبلاً.
 
 ---
 
 ## 🌟 الميزات الرئيسية
 
-- **توافق معيار OpenAI الرسمية**: يعمل مباشرة مع جميع الملحقات (Plugins)، منشئي المواقع (Site Builders)، وأطر عمل الذكاء الاصطناعي (مثل TypingMind, LangChain, AutoGen, Firebase, NextChat).
+- **مشغل الملف التنفيذي (Batch File Automation - `Start_ChatGPT_API.bat`)**: اختصار آلي شامل؛ بنقرة واحدة فقط يقوم بتنظيف الجلسات القديمة، تشغيل سيرفر Python، وتأمين النفق الخارجي دون كتابة أية أوامر في التيرمينال.
+- **توافق معيار OpenAI الرسمي**: يعمل مباشرة مع جميع الملحقات (Plugins)، منشئي المواقع (Site Builders)، وأطر عمل الذكاء الاصطناعي (مثل TypingMind, LangChain, AutoGen, Firebase, NextChat).
 - **دعم البث المباشر (SSE Stream)**: يدعم نمط البث `stream: true` و `stream: false` كواجهة OpenAI الرسمية.
 - **استراتيجية جلب النص المبتكرة الرباعية**:
   1. زر النسخ المباشر والحافظة (Clipboard)
@@ -14,8 +15,20 @@
   3. مسح العناصر الذكي المعاصر عبر JavaScript DOM
   4. خطة طوارئ لاستخراج النص الخام لآخر `<article>`
 - **مرونة واستعادة تلقائية (Auto-Recovery)**: في حال إغلاق أو انهيار متصفح Playwright، يعيد السيرفر فتح المتصفح تلقائياً دون سقوط السيرفر.
-- **مشغل بضغطة زر واحدة (1-Click Desktop Launcher)**: يتوفر سكريبت `Start_ChatGPT_API.bat` لتشغيل السيرفر والنفق بضغطة زر واحدة دون الحاجة لإعادة أوامر التثبيت.
 - **مرونة الأنفاق والبدائل**: يدعم الربط عبر **Ngrok (رابط ثابت)**، **Cloudflare Tunnel**، **LocalTunnel**، أو **Firebase Functions**.
+
+---
+
+## ⚡ ملف الباتش التشغيلي (Batch File Launcher)
+
+بعد تثبيت المكتبات للمرة الأولى، لا تحتاج لفتح PowerShell أو كتابة أية أوامر. فقط استخدم ملف الباتش المرفق:
+
+📄 **`Start_ChatGPT_API.bat`**
+
+**ماذا يفعل ملف الباتش عند النقر عليه مرتين؟**
+1. أغلاق أية عمليات علقت في الخلفية (`chrome.exe` و `ngrok.exe`).
+2. تشغيل سيرفر Python المحلي على المنفذ `8008`.
+3. تشغيل نفق الربط الخارجي تلقائياً.
 
 ---
 
@@ -25,14 +38,14 @@
 📖 **[دليل التثبيت والتشغيل التفصيلي (INSTALLATION.md)](INSTALLATION.md)**
 
 ```bash
-# 1. تثبيت الحزم (مرة واحدة)
+# 1. تثبيت الحزم (مرة واحدة فقط أول مرة)
 pip install -r requirements.txt
 
-# 2. تثبيت متصفح Playwright (مرة واحدة)
+# 2. تثبيت متصفح Playwright (مرة واحدة فقط أول مرة)
 playwright install chromium
 
-# 3. التشغيل اليومي (بضغطة زر)
-انقر مرتين على ملف Start_ChatGPT_API.bat
+# 3. التشغيل المستقبلي بضغطة زر
+انقر مرتين على ملف الباتش: Start_ChatGPT_API.bat
 ```
 
 ---
