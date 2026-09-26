@@ -329,34 +329,39 @@ class ChatGPTEngine:
         return ""
 
     async def generate_chat_response(self, prompt: str) -> str:
-        """إرسال الطلب واستخراج الرد فوراً مع تصفية وتطهير الذاكرة في كل طلب."""
+        """إرسال الطلب مرة واحدة فقط واستخراج الرد فوراً مع تصفية وتطهير الذاكرة."""
         async with self.lock:
             await self.ensure_healthy_page()
 
             # 🧹 إعادة تعيين وتطهير ذاكرة الحافظة الملتقطة في بداية الطلب
             self.capturer.reset()
 
+            # 🚀 1. إرسال البرومبت لمرة واحدة فقط مطلقة لمنع تكرار الرسائل
+            logger.info("🚀 إرسال البرومبت إلى ChatGPT (مرة واحدة فقط)...")
+            await self.send_prompt(prompt)
+
+            # ⏳ 2. الانتظار اللحظي حتى اكتمال توليد الإجابة
+            await self.wait_for_generation_to_finish()
+
+            # 📌 3. محاولة استخراج الرد (إعادة المحاولة للقراءة فقط دون إعادة إرسال البرومبت)
             for attempt in range(1, config.MAX_EXTRACTION_ATTEMPTS + 1):
                 try:
-                    await self.send_prompt(prompt)
-                    await self.wait_for_generation_to_finish()
-                    
                     response_text = await self.extract_response()
                     if response_text:
                         self.capturer.reset()
                         return response_text
-                    
-                    logger.warning(f"محاولة استخراج فارغة ({attempt}/{config.MAX_EXTRACTION_ATTEMPTS})، إعادة المحاولة...")
-                    await asyncio.sleep(0.2)
+
+                    logger.warning(f"محاولة استخراج فارغة ({attempt}/{config.MAX_EXTRACTION_ATTEMPTS})، إعادة محاولة القراءة...")
+                    await asyncio.sleep(0.4)
                 except Exception as e:
-                    logger.error(f"خطأ خلال تنفيذ البرومبت (المحاولة {attempt}): {e}")
+                    logger.error(f"خطأ خلال قراءة الرد (المحاولة {attempt}): {e}")
                     if attempt == config.MAX_EXTRACTION_ATTEMPTS:
                         self.capturer.reset()
                         raise e
-                    await asyncio.sleep(0.2)
+                    await asyncio.sleep(0.3)
 
             self.capturer.reset()
-            raise RuntimeError("فشل استخراج أي نص من ChatGPT بعد عدة محاولات.")
+            raise RuntimeError("فشل استخراج أي نص من ChatGPT بعد عدة محاولات قراءة.")
 
     async def close(self):
         """إغلاق المتصفح وسياق Playwright بنظافة."""

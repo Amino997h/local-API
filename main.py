@@ -2,7 +2,9 @@ import time
 import uuid
 import json
 import logging
-from typing import List, Optional, Union, Dict, Any
+import hashlib
+import asyncio
+from typing import List, Optional, Union, Dict, Any, Tuple
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Depends, Security, status
@@ -19,8 +21,10 @@ logger = logging.getLogger("ChatGPTLocalAPI")
 # Security
 security = HTTPBearer(auto_error=False)
 
-# Initialize Engine
+# Initialize Engine & Request Deduplication Cache
 engine = ChatGPTEngine()
+request_cache: Dict[str, Tuple[float, str]] = {}  # prompt_hash -> (timestamp, response_text)
+in_flight_tasks: Dict[str, asyncio.Task] = {}     # prompt_hash -> task
 
 
 async def verify_api_key(credentials: Optional[HTTPAuthorizationCredentials] = Security(security)):
@@ -202,60 +206,14 @@ async def list_models(authenticated: bool = Depends(verify_api_key)):
     }
 
 
-@app.post("/v1/chat/completions", tags=["OpenAI Compatibility"])
-async def create_chat_completion(
+def build_completion_response(
     request: ChatCompletionRequest,
-    authenticated: bool = Depends(verify_api_key),
+    completion_id: str,
+    created_timestamp: int,
+    full_prompt: str,
+    reply_text: str,
 ):
-    """
-    نقطة النهاية الرئيسية المحاكية لـ OpenAI Chat Completions.
-    تتلقى الرسائل وتفلتر الكليشات المكررة ثم ترسل الرسالة الحالية بنظافة لـ ChatGPT.
-    تكتشف الطلبات التلقائية الثانوية وتجيب عليها فوراً بـ 0ms محلياً.
-    """
-    if not request.messages:
-        raise HTTPException(status_code=400, detail="مصفوفة الرسائل messages لا يمكن أن تكون فارغة.")
-
-    completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
-    created_timestamp = int(time.time())
-
-    # تجميع وتنظيف النص بالكامل عبر format_clean_prompt
-    full_prompt = format_clean_prompt(request.messages)
-    full_prompt_lower = full_prompt.lower()
-
-    # ⚡ 1. رصد طلبات تسمية شريط المحادثة التلقائية (Auto-Title Generation)
-    if "generate a short title" in full_prompt_lower or "generate a title" in full_prompt_lower:
-        logger.info("⚡ رصد طلب تلقائي لتسمية المحادثة (Auto-Title Request) - إرجاع عنوان سريع محلياً بـ 0ms بدون إرساله لـ ChatGPT.")
-        user_snippet = ""
-        for m in request.messages:
-            if m.role == "user" and m.content:
-                user_snippet = str(m.content).strip()
-                break
-        reply_text = user_snippet[:35] if user_snippet else "محادثة جديدة"
-
-    # ⚡ 2. رصد طلبات تحليل الذاكرة واستخراج الحقائق الخلفية (Memory Extraction)
-    elif "memory extraction assistant" in full_prompt_lower or "durable personal facts" in full_prompt_lower or "extract durable" in full_prompt_lower:
-        logger.info("⚡ رصد طلب تلقائي لاستخراج الذاكرة (Memory Extraction Request) - إرجاع '[]' محلياً بـ 0ms بدون إرساله لـ ChatGPT.")
-        reply_text = "[]"
-
-    # 🚀 3. الطلب النظيف الموجه لـ ChatGPT
-    else:
-        logger.info(f"استلام طلب جيل جديد ({len(request.messages)} رسائل، Stream={request.stream}). البرومبت النظيف: '{full_prompt}'")
-
-        try:
-            reply_text = await engine.generate_chat_response(full_prompt)
-        except RuntimeError as r_err:
-            logger.error(f"خطأ في جلسة ChatGPT: {r_err}")
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=f"ChatGPT session error or intervention required: {str(r_err)}",
-            )
-        except Exception as e:
-            logger.error(f"خطأ غير متوقع أثناء المعالجة: {e}")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Internal Server Error: {str(e)}",
-            )
-
+    """بناء استجابة OpenAI المعيارية سواء بتدفق SSE أو رد JSON موحد."""
     logger.info(f"📤 الرد الجاهز للإرسال (الطول: {len(reply_text)} حرف): '{reply_text[:100]}...'")
 
     # إذا كان التطبيق طالب للـ Streaming (SSE)
@@ -318,6 +276,93 @@ async def create_chat_completion(
         system_fingerprint="fp_local",
     )
     return JSONResponse(content=response_obj.model_dump())
+
+
+@app.post("/v1/chat/completions", tags=["OpenAI Compatibility"])
+async def create_chat_completion(
+    request: ChatCompletionRequest,
+    authenticated: bool = Depends(verify_api_key),
+):
+    """
+    نقطة النهاية الرئيسية المحاكية لـ OpenAI Chat Completions.
+    تتلقى الرسائل وتفلتر الكليشات المكررة ثم ترسل الرسالة الحالية بنظافة لـ ChatGPT.
+    تكتشف الطلبات التلقائية الثانوية وتجيب عليها فوراً بـ 0ms محلياً.
+    """
+    if not request.messages:
+        raise HTTPException(status_code=400, detail="مصفوفة الرسائل messages لا يمكن أن تكون فارغة.")
+
+    completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+    created_timestamp = int(time.time())
+
+    # تجميع وتنظيف النص بالكامل عبر format_clean_prompt
+    full_prompt = format_clean_prompt(request.messages)
+    full_prompt_lower = full_prompt.lower()
+
+    # ⚡ 1. رصد طلبات تسمية شريط المحادثة التلقائية (Auto-Title Generation)
+    if "generate a short title" in full_prompt_lower or "generate a title" in full_prompt_lower:
+        logger.info("⚡ رصد طلب تلقائي لتسمية المحادثة (Auto-Title Request) - إرجاع عنوان سريع محلياً بـ 0ms بدون إرساله لـ ChatGPT.")
+        user_snippet = ""
+        for m in request.messages:
+            if m.role == "user" and m.content:
+                user_snippet = str(m.content).strip()
+                break
+        reply_text = user_snippet[:35] if user_snippet else "محادثة جديدة"
+
+    # ⚡ 2. رصد طلبات تحليل الذاكرة واستخراج الحقائق الخلفية (Memory Extraction)
+    elif "memory extraction assistant" in full_prompt_lower or "durable personal facts" in full_prompt_lower or "extract durable" in full_prompt_lower:
+        logger.info("⚡ رصد طلب تلقائي لاستخراج الذاكرة (Memory Extraction Request) - إرجاع '[]' محلياً بـ 0ms بدون إرساله لـ ChatGPT.")
+        reply_text = "[]"
+
+    # 🚀 3. الطلب النظيف الموجه لـ ChatGPT مع حماية منع التكرار المزدوج
+    else:
+        prompt_hash = hashlib.sha256(full_prompt.encode("utf-8")).hexdigest()
+        now = time.time()
+
+        # 🛡️ أ. فحص الذاكرة السريعة لمنع معالجة الطلبات المكررة التي وصلت خلال 15 ثانية
+        if prompt_hash in request_cache:
+            cached_time, cached_reply = request_cache[prompt_hash]
+            if now - cached_time < 15.0:
+                logger.info("🛡️ تم رصد طلب مكرر وصل حديثاً - إرجاع النتيجة السابقة محلياً بـ 0ms لمنع تكرار الأتمتة.")
+                reply_text = cached_reply
+                return build_completion_response(request, completion_id, created_timestamp, full_prompt, reply_text)
+
+        # 🛡️ ب. فحص الطلبات التي تجري معالجتها حالياً لتجنب إرسالها مرتين
+        if prompt_hash in in_flight_tasks:
+            logger.info("🛡️ تم رصد طلب مطابق قيد المعالجة الآن - الانتظار لاستخدام النتيجة فور اكتمالها دون تكرار الإرسال.")
+            try:
+                reply_text = await in_flight_tasks[prompt_hash]
+                return build_completion_response(request, completion_id, created_timestamp, full_prompt, reply_text)
+            except Exception as e:
+                logger.error(f"فشلت المهمة الجارية: {e}")
+
+        logger.info(f"استلام طلب جيل جديد ({len(request.messages)} رسائل، Stream={request.stream}). البرومبت النظيف: '{full_prompt}'")
+
+        async def execute_request():
+            res = await engine.generate_chat_response(full_prompt)
+            request_cache[prompt_hash] = (time.time(), res)
+            return res
+
+        task = asyncio.create_task(execute_request())
+        in_flight_tasks[prompt_hash] = task
+
+        try:
+            reply_text = await task
+        except RuntimeError as r_err:
+            logger.error(f"خطأ في جلسة ChatGPT: {r_err}")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"ChatGPT session error or intervention required: {str(r_err)}",
+            )
+        except Exception as e:
+            logger.error(f"خطأ غير متوقع أثناء المعالجة: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Internal Server Error: {str(e)}",
+            )
+        finally:
+            in_flight_tasks.pop(prompt_hash, None)
+
+    return build_completion_response(request, completion_id, created_timestamp, full_prompt, reply_text)
 
 
 if __name__ == "__main__":
