@@ -26,9 +26,13 @@ def cleanup_profile_locks(profile_dir: Path):
 
 
 class ChatGPTResponseCapturer:
-    """مستقبل الردود الذكي لـ ChatGPT عبر اعتراض شبكة الـ API اللحظية."""
+    """مستقبل الردود الذكي لـ ChatGPT عبر اعتراض شبكة الـ API اللحظية مع تصفية العزل المعزول."""
 
     def __init__(self):
+        self.captured_text = ""
+
+    def reset(self):
+        """تصفية وإعادة تعيين الذاكرة المؤقتة لمنع اختلاط الاستجابات بين الطلبات."""
         self.captured_text = ""
 
     async def handle_response(self, response):
@@ -58,7 +62,7 @@ class ChatGPTResponseCapturer:
 
 class ChatGPTEngine:
     """
-    محرك أتمتة ChatGPT الفائق السرعة والمرن مع استجابة لحظية ومنع التمرير التلقائي.
+    محرك أتمتة ChatGPT الفائق السرعة والمرن مع عزل كامل للذاكرة ومنع اختلاط الاستجابات.
     """
 
     def __init__(self):
@@ -141,7 +145,7 @@ class ChatGPTEngine:
         return None
 
     async def send_prompt(self, prompt: str):
-        """إرسال البرومبت الفوري بدون تمرير القفز التلقائي."""
+        """إرسال البرومبت الفوري مع مسح وتطهير كامل لمربع الإدخال لمنع التكرار."""
         prompt_box = await self.get_prompt_box()
 
         if prompt_box is None:
@@ -149,11 +153,21 @@ class ChatGPTEngine:
                 "لم يتم العثور على مربع كتابة الرسالة في ChatGPT. قد يكون هناك تحقق (CAPTCHA) أو يتطلب تسجيل الدخول."
             )
 
-        # التركيز والنقر عبر evaluate لتجنب قفز التمرير scrollIntoView
-        await prompt_box.evaluate("el => el.focus()")
+        # 🧹 تطهير كامل ومطلق لمربع الإدخال عبر JS لتفادي وجود بقايا نص قديم
+        await prompt_box.evaluate("""el => {
+            el.focus();
+            try {
+                while (el.firstChild) { el.removeChild(el.firstChild); }
+                if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
+                    el.value = '';
+                } else {
+                    el.innerText = '';
+                }
+            } catch(e) {}
+        }""")
         await asyncio.sleep(0.05)
 
-        # مسح أي نص قديم بسرعة
+        # محاكاة الضغط لتنظيف أية أحداث ProseMirror معلقة
         await self.page.keyboard.press("Control+A")
         await self.page.keyboard.press("Backspace")
         await asyncio.sleep(0.05)
@@ -173,7 +187,6 @@ class ChatGPTEngine:
 
         if send_button:
             try:
-                # استخدام JS click لمنع قفزة الشاشة
                 await send_button.evaluate("btn => btn.click()")
                 return
             except Exception:
@@ -226,28 +239,30 @@ class ChatGPTEngine:
 
     async def extract_response(self) -> str:
         """
-        استخراج النص اللحظي مع منع قفز شريط التمرير (No Scroll Jumps):
-        1. فحص نص الشبكة الملتقط فوراً (0ms)
-        2. فحص زر النسخ عبر JS DOM دون تحريك الشاشة
-        3. مسح DOM المباشر عبر JS
+        استخراج النص اللحظي المعزول مع منع تسريب الردود السابقة:
+        1. فحص نص الشبكة الملتقط للطلب الحالي
+        2. فحص زر النسخ عبر JS DOM
+        3. مسح DOM المباشر لآخر عنصر مساعد
         """
         # ─── 🥇 1. اعتراض شبكة الـ API اللحظية ───
         if self.capturer.captured_text and self.capturer.captured_text.strip():
+            extracted = self.capturer.captured_text.strip()
+            self.capturer.reset() # تفريغ الذاكرة المؤقتة فوراً بعد القراءة
             logger.info("⚡ تم جلب الرد لحظياً عبر (اعتراض شبكة الـ API).")
-            return self.capturer.captured_text.strip()
+            return extracted
 
-        # ─── 🥈 2. تقنية زر النسخ عبر JS النظيف دون تحريك الشاشة ───
+        # ─── 🥈 2. تقنية زر النسخ عبر JS النظيف ───
         try:
             copy_buttons = self.page.locator(', '.join(config.COPY_BUTTON_SELECTORS))
             count = await copy_buttons.count()
             if count > 0:
                 last_copy_btn = copy_buttons.nth(count - 1)
                 if await last_copy_btn.is_visible():
-                    # استخدام JS click يمنع سحب الشاشة لأعلى ولأسفل
                     await last_copy_btn.evaluate("btn => btn.click()")
                     await asyncio.sleep(0.1)
                     clipboard_text = await self.page.evaluate("navigator.clipboard.readText()")
                     if clipboard_text and clipboard_text.strip():
+                        self.capturer.reset()
                         logger.info("📌 تم جلب الرد بنجاح عبر (زر النسخ المباشر والحافظة).")
                         return clipboard_text.strip()
         except Exception as e:
@@ -289,6 +304,7 @@ class ChatGPTEngine:
                 }
             """)
             if js_extracted and js_extracted.strip():
+                self.capturer.reset()
                 logger.info("📌 تم جلب الرد بنجاح عبر (المسح الذكي لـ DOM).")
                 return js_extracted.strip()
         except Exception as e:
@@ -303,19 +319,22 @@ class ChatGPTEngine:
                 }
             """)
             if fallback_text and fallback_text.strip():
+                self.capturer.reset()
                 logger.info("📌 تم جلب الرد بنجاح عبر (خطة الطوارئ - النص الخام).")
                 return fallback_text.strip()
         except Exception as e:
             logger.error(f"فشل استخراج النص التكافئي: {e}")
 
+        self.capturer.reset()
         return ""
 
     async def generate_chat_response(self, prompt: str) -> str:
-        """إرسال الطلب واستخراج الرد فوراً مع استخدام asyncio.Lock."""
+        """إرسال الطلب واستخراج الرد فوراً مع تصفية وتطهير الذاكرة في كل طلب."""
         async with self.lock:
             await self.ensure_healthy_page()
 
-            self.capturer.captured_text = ""
+            # 🧹 إعادة تعيين وتطهير ذاكرة الحافظة الملتقطة في بداية الطلب
+            self.capturer.reset()
 
             for attempt in range(1, config.MAX_EXTRACTION_ATTEMPTS + 1):
                 try:
@@ -324,6 +343,7 @@ class ChatGPTEngine:
                     
                     response_text = await self.extract_response()
                     if response_text:
+                        self.capturer.reset()
                         return response_text
                     
                     logger.warning(f"محاولة استخراج فارغة ({attempt}/{config.MAX_EXTRACTION_ATTEMPTS})، إعادة المحاولة...")
@@ -331,9 +351,11 @@ class ChatGPTEngine:
                 except Exception as e:
                     logger.error(f"خطأ خلال تنفيذ البرومبت (المحاولة {attempt}): {e}")
                     if attempt == config.MAX_EXTRACTION_ATTEMPTS:
+                        self.capturer.reset()
                         raise e
                     await asyncio.sleep(0.2)
 
+            self.capturer.reset()
             raise RuntimeError("فشل استخراج أي نص من ChatGPT بعد عدة محاولات.")
 
     async def close(self):
