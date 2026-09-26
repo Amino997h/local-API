@@ -212,45 +212,9 @@ def build_completion_response(
     full_prompt: str,
     reply_text: str,
 ):
-    """بناء استجابة OpenAI المعيارية سواء بتدفق SSE أو رد JSON موحد."""
+    """بناء استجابة JSON OpenAI المعيارية للطلبات غير المتدفقة."""
     logger.info(f"📤 الرد الجاهز للإرسال (الطول: {len(reply_text)} حرف): '{reply_text[:100]}...'")
 
-    # إذا كان التطبيق طالب للـ Streaming (SSE)
-    if request.stream:
-        async def event_generator():
-            chunk_data = {
-                "id": completion_id,
-                "object": "chat.completion.chunk",
-                "created": created_timestamp,
-                "model": request.model,
-                "choices": [
-                    {
-                        "index": 0,
-                        "delta": {"role": "assistant", "content": reply_text},
-                        "finish_reason": None,
-                    }
-                ],
-            }
-            yield f"data: {json.dumps(chunk_data, ensure_ascii=False)}\n\n"
-            stop_chunk = {
-                "id": completion_id,
-                "object": "chat.completion.chunk",
-                "created": created_timestamp,
-                "model": request.model,
-                "choices": [
-                    {
-                        "index": 0,
-                        "delta": {},
-                        "finish_reason": "stop",
-                    }
-                ],
-            }
-            yield f"data: {json.dumps(stop_chunk, ensure_ascii=False)}\n\n"
-            yield "data: [DONE]\n\n"
-
-        return StreamingResponse(event_generator(), media_type="text/event-stream")
-
-    # الرد المعياري JSON
     response_obj = ChatCompletionResponse(
         id=completion_id,
         created=created_timestamp,
@@ -283,9 +247,7 @@ async def create_chat_completion(
     authenticated: bool = Depends(verify_api_key),
 ):
     """
-    نقطة النهاية الرئيسية المحاكية لـ OpenAI Chat Completions.
-    تتلقى الرسائل وتفلتر الكليشات المكررة ثم ترسل الرسالة الحالية بنظافة لـ ChatGPT.
-    تكتشف الطلبات التلقائية الثانوية وتجيب عليها فوراً بـ 0ms محلياً.
+    نقطة النهاية الرئيسية المحاكية لـ OpenAI Chat Completions مع دعم التدفق اللحظي المباشر وحماية منع انقطاع الاتصال (Heartbeat Keep-Alive).
     """
     if not request.messages:
         raise HTTPException(status_code=400, detail="مصفوفة الرسائل messages لا يمكن أن تكون فارغة.")
@@ -299,42 +261,120 @@ async def create_chat_completion(
 
     # ⚡ 1. رصد طلبات تسمية شريط المحادثة التلقائية (Auto-Title Generation)
     if "generate a short title" in full_prompt_lower or "generate a title" in full_prompt_lower:
-        logger.info("⚡ رصد طلب تلقائي لتسمية المحادثة (Auto-Title Request) - إرجاع عنوان سريع محلياً بـ 0ms بدون إرساله لـ ChatGPT.")
+        logger.info("⚡ رصد طلب تلقائي لتسمية المحادثة (Auto-Title Request) - إرجاع عنوان سريع محلياً بـ 0ms.")
         user_snippet = ""
         for m in request.messages:
             if m.role == "user" and m.content:
                 user_snippet = str(m.content).strip()
                 break
         reply_text = user_snippet[:35] if user_snippet else "محادثة جديدة"
+        return build_completion_response(request, completion_id, created_timestamp, full_prompt, reply_text)
 
     # ⚡ 2. رصد طلبات تحليل الذاكرة واستخراج الحقائق الخلفية (Memory Extraction)
     elif "memory extraction assistant" in full_prompt_lower or "durable personal facts" in full_prompt_lower or "extract durable" in full_prompt_lower:
-        logger.info("⚡ رصد طلب تلقائي لاستخراج الذاكرة (Memory Extraction Request) - إرجاع '[]' محلياً بـ 0ms بدون إرساله لـ ChatGPT.")
+        logger.info("⚡ رصد طلب تلقائي لاستخراج الذاكرة (Memory Extraction Request) - إرجاع '[]' محلياً بـ 0ms.")
         reply_text = "[]"
+        return build_completion_response(request, completion_id, created_timestamp, full_prompt, reply_text)
 
-    # 🚀 3. الطلب النظيف الموجه لـ ChatGPT مع حماية منع التكرار المزدوج
+    # 🚀 3. الطلب النظيف الموجه لـ ChatGPT مع حماية منع التكرار والانقطاع
+    prompt_hash = hashlib.sha256(full_prompt.encode("utf-8")).hexdigest()
+    now = time.time()
+
+    # إذا كان الطلب من نوع Stream=True (بث متدفق SSE)
+    if request.stream:
+        async def sse_stream_generator():
+            # 💖 1. إرسال تعليق نبض الحياة فوراً لإرجاع ترويسات 200 OK فوراً (0ms) وإبقاء الاتصال حياً
+            yield ": keep-alive\n\n"
+
+            cached_text = None
+            if prompt_hash in request_cache:
+                c_time, c_reply = request_cache[prompt_hash]
+                if time.time() - c_time < 15.0:
+                    cached_text = c_reply
+
+            if cached_text is None:
+                if prompt_hash not in in_flight_tasks:
+                    async def fetch():
+                        res = await engine.generate_chat_response(full_prompt)
+                        request_cache[prompt_hash] = (time.time(), res)
+                        return res
+                    in_flight_tasks[prompt_hash] = asyncio.create_task(fetch())
+
+                task = in_flight_tasks[prompt_hash]
+
+                # 💖 2. إرسال نبضات دورية كل 1.5 ثانية لمنع المهلة في Ngrok والمتصفحات أثناء معالجة ChatGPT
+                while not task.done():
+                    await asyncio.sleep(1.5)
+                    if not task.done():
+                        yield ": keep-alive\n\n"
+
+                try:
+                    reply_text = await task
+                except Exception as e:
+                    logger.error(f"خطأ أثناء توليد الإجابة: {e}")
+                    reply_text = f"حدث خطأ أثناء معالجة الطلب عبر ChatGPT: {str(e)}"
+                finally:
+                    in_flight_tasks.pop(prompt_hash, None)
+            else:
+                reply_text = cached_text
+
+            logger.info(f"📤 البث المباشر للرد (الطول: {len(reply_text)} حرف): '{reply_text[:100]}...'")
+
+            # 📦 3. بث الرد على أجزاء مقسمة بنظافة (200 حرف للقطع) لضمان المعالجة التامة في العميل
+            chunk_size = 200
+            for i in range(0, len(reply_text), chunk_size):
+                piece = reply_text[i:i + chunk_size]
+                chunk_data = {
+                    "id": completion_id,
+                    "object": "chat.completion.chunk",
+                    "created": created_timestamp,
+                    "model": request.model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"role": "assistant", "content": piece},
+                            "finish_reason": None,
+                        }
+                    ],
+                }
+                yield f"data: {json.dumps(chunk_data, ensure_ascii=False)}\n\n"
+                await asyncio.sleep(0.005)
+
+            stop_chunk = {
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "created": created_timestamp,
+                "model": request.model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": "stop",
+                    }
+                ],
+            }
+            yield f"data: {json.dumps(stop_chunk, ensure_ascii=False)}\n\n"
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(sse_stream_generator(), media_type="text/event-stream")
+
+    # إذا كان الطلب عادي غير متدفق (Stream=False)
     else:
-        prompt_hash = hashlib.sha256(full_prompt.encode("utf-8")).hexdigest()
-        now = time.time()
-
-        # 🛡️ أ. فحص الذاكرة السريعة لمنع معالجة الطلبات المكررة التي وصلت خلال 15 ثانية
         if prompt_hash in request_cache:
             cached_time, cached_reply = request_cache[prompt_hash]
             if now - cached_time < 15.0:
-                logger.info("🛡️ تم رصد طلب مكرر وصل حديثاً - إرجاع النتيجة السابقة محلياً بـ 0ms لمنع تكرار الأتمتة.")
-                reply_text = cached_reply
-                return build_completion_response(request, completion_id, created_timestamp, full_prompt, reply_text)
+                logger.info("🛡️ تم رصد طلب مكرر - إرجاع النتيجة المعزولة السابقة محلياً.")
+                return build_completion_response(request, completion_id, created_timestamp, full_prompt, cached_reply)
 
-        # 🛡️ ب. فحص الطلبات التي تجري معالجتها حالياً لتجنب إرسالها مرتين
         if prompt_hash in in_flight_tasks:
-            logger.info("🛡️ تم رصد طلب مطابق قيد المعالجة الآن - الانتظار لاستخدام النتيجة فور اكتمالها دون تكرار الإرسال.")
+            logger.info("🛡️ تم رصد طلب مطابق قيد المعالجة - الانتظار دون تكرار الإرسال.")
             try:
                 reply_text = await in_flight_tasks[prompt_hash]
                 return build_completion_response(request, completion_id, created_timestamp, full_prompt, reply_text)
             except Exception as e:
                 logger.error(f"فشلت المهمة الجارية: {e}")
 
-        logger.info(f"استلام طلب جيل جديد ({len(request.messages)} رسائل، Stream={request.stream}). البرومبت النظيف: '{full_prompt}'")
+        logger.info(f"استلام طلب جيل جديد ({len(request.messages)} رسائل، Stream=False). البرومبت النظيف: '{full_prompt}'")
 
         async def execute_request():
             res = await engine.generate_chat_response(full_prompt)
@@ -350,10 +390,10 @@ async def create_chat_completion(
             logger.error(f"خطأ في جلسة ChatGPT: {r_err}")
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=f"ChatGPT session error or intervention required: {str(r_err)}",
+                detail=f"ChatGPT session error: {str(r_err)}",
             )
         except Exception as e:
-            logger.error(f"خطأ غير متوقع أثناء المعالجة: {e}")
+            logger.error(f"خطأ غير متوقع: {e}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Internal Server Error: {str(e)}",
@@ -361,7 +401,7 @@ async def create_chat_completion(
         finally:
             in_flight_tasks.pop(prompt_hash, None)
 
-    return build_completion_response(request, completion_id, created_timestamp, full_prompt, reply_text)
+        return build_completion_response(request, completion_id, created_timestamp, full_prompt, reply_text)
 
 
 if __name__ == "__main__":
