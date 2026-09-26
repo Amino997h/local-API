@@ -283,8 +283,21 @@ async def create_chat_completion(
     # إذا كان الطلب من نوع Stream=True (بث متدفق SSE)
     if request.stream:
         async def sse_stream_generator():
-            # 💖 1. إرسال تعليق نبض الحياة فوراً لإرجاع ترويسات 200 OK فوراً (0ms) وإبقاء الاتصال حياً
-            yield ": keep-alive\n\n"
+            # ⚡ 1. إرسال ترويسة بداية البث فوراً لضمان 0ms استجابة وحماية الاتصال
+            init_chunk = {
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "created": created_timestamp,
+                "model": request.model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"role": "assistant", "content": ""},
+                        "finish_reason": None,
+                    }
+                ],
+            }
+            yield f"data: {json.dumps(init_chunk, ensure_ascii=False)}\n\n"
 
             cached_text = None
             if prompt_hash in request_cache:
@@ -292,53 +305,67 @@ async def create_chat_completion(
                 if time.time() - c_time < 15.0:
                     cached_text = c_reply
 
-            if cached_text is None:
-                if prompt_hash not in in_flight_tasks:
-                    async def fetch():
-                        res = await engine.generate_chat_response(full_prompt)
-                        request_cache[prompt_hash] = (time.time(), res)
-                        return res
-                    in_flight_tasks[prompt_hash] = asyncio.create_task(fetch())
-
-                task = in_flight_tasks[prompt_hash]
-
-                # 💖 2. إرسال نبضات دورية كل 1.5 ثانية لمنع المهلة في Ngrok والمتصفحات أثناء معالجة ChatGPT
-                while not task.done():
-                    await asyncio.sleep(1.5)
-                    if not task.done():
-                        yield ": keep-alive\n\n"
-
-                try:
-                    reply_text = await task
-                except Exception as e:
-                    logger.error(f"خطأ أثناء توليد الإجابة: {e}")
-                    reply_text = f"حدث خطأ أثناء معالجة الطلب عبر ChatGPT: {str(e)}"
-                finally:
-                    in_flight_tasks.pop(prompt_hash, None)
+            if cached_text:
+                chunk_size = 200
+                for i in range(0, len(cached_text), chunk_size):
+                    piece = cached_text[i:i + chunk_size]
+                    chunk_data = {
+                        "id": completion_id,
+                        "object": "chat.completion.chunk",
+                        "created": created_timestamp,
+                        "model": request.model,
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {"role": "assistant", "content": piece},
+                                "finish_reason": None,
+                            }
+                        ],
+                    }
+                    yield f"data: {json.dumps(chunk_data, ensure_ascii=False)}\n\n"
+                    await asyncio.sleep(0.005)
             else:
-                reply_text = cached_text
+                full_reply_text = []
+                try:
+                    # 🚀 2. قراءة البث المباشر اللحظي قطعة بقطعة أثناء كتابة ChatGPT في المتصفح
+                    async for chunk_piece in engine.generate_chat_response_stream(full_prompt):
+                        if chunk_piece:
+                            full_reply_text.append(chunk_piece)
+                            chunk_data = {
+                                "id": completion_id,
+                                "object": "chat.completion.chunk",
+                                "created": created_timestamp,
+                                "model": request.model,
+                                "choices": [
+                                    {
+                                        "index": 0,
+                                        "delta": {"role": "assistant", "content": chunk_piece},
+                                        "finish_reason": None,
+                                    }
+                                ],
+                            }
+                            yield f"data: {json.dumps(chunk_data, ensure_ascii=False)}\n\n"
 
-            logger.info(f"📤 البث المباشر للرد (الطول: {len(reply_text)} حرف): '{reply_text[:100]}...'")
-
-            # 📦 3. بث الرد على أجزاء مقسمة بنظافة (200 حرف للقطع) لضمان المعالجة التامة في العميل
-            chunk_size = 200
-            for i in range(0, len(reply_text), chunk_size):
-                piece = reply_text[i:i + chunk_size]
-                chunk_data = {
-                    "id": completion_id,
-                    "object": "chat.completion.chunk",
-                    "created": created_timestamp,
-                    "model": request.model,
-                    "choices": [
-                        {
-                            "index": 0,
-                            "delta": {"role": "assistant", "content": piece},
-                            "finish_reason": None,
-                        }
-                    ],
-                }
-                yield f"data: {json.dumps(chunk_data, ensure_ascii=False)}\n\n"
-                await asyncio.sleep(0.005)
+                    complete_text = "".join(full_reply_text)
+                    if complete_text.strip():
+                        request_cache[prompt_hash] = (time.time(), complete_text)
+                        logger.info(f"📤 تم إكمال البث المباشر اللحظي بنجاح (الطول الإجمالي: {len(complete_text)} حرف)")
+                except Exception as e:
+                    logger.error(f"خطأ أثناء البث المباشر: {e}")
+                    err_chunk = {
+                        "id": completion_id,
+                        "object": "chat.completion.chunk",
+                        "created": created_timestamp,
+                        "model": request.model,
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {"role": "assistant", "content": f"\n\n[تنبيه خطأ البث: {str(e)}]"},
+                                "finish_reason": None,
+                            }
+                        ],
+                    }
+                    yield f"data: {json.dumps(err_chunk, ensure_ascii=False)}\n\n"
 
             stop_chunk = {
                 "id": completion_id,

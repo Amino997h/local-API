@@ -336,6 +336,104 @@ class ChatGPTEngine:
         self.capturer.reset()
         return ""
 
+    async def extract_response_snapshot(self) -> str:
+        """جلب لقطة نصية لحظية سريعة أثناء كتابة ChatGPT لاستخدامها في البث المباشر الحقيقي."""
+        if self.capturer.captured_text and self.capturer.captured_text.strip():
+            return self.capturer.captured_text.strip()
+        try:
+            js_extracted = await self.page.evaluate("""
+                () => {
+                    const assistantNodes = document.querySelectorAll('[data-message-author-role="assistant"], [data-testid*="assistant"], article');
+                    if (assistantNodes.length > 0) {
+                        const lastNode = assistantNodes[assistantNodes.length - 1];
+                        const markdown = lastNode.querySelector('.markdown, .prose, [class*="markdown"], [class*="prose"]');
+                        if (markdown && markdown.innerText.trim()) {
+                            return markdown.innerText.trim();
+                        }
+                        if (lastNode.innerText.trim()) {
+                            return lastNode.innerText.trim();
+                        }
+                    }
+                    const markdowns = document.querySelectorAll('.markdown, .prose');
+                    if (markdowns.length > 0) {
+                        return markdowns[markdowns.length - 1].innerText.trim();
+                    }
+                    return "";
+                }
+            """)
+            return js_extracted.strip() if js_extracted else ""
+        except Exception:
+            return ""
+
+    async def generate_chat_response_stream(self, prompt: str):
+        """بث الرد مباشرة وحظياً (Real-Time SSE Streaming) أثناء كتابة ChatGPT في المتصفح."""
+        async with self.lock:
+            await self.ensure_healthy_page()
+            self.capturer.reset()
+
+            logger.info("🚀 إرسال البرومبت لبدء البث المباشر الحقيقي Real-Time...")
+            await self.send_prompt(prompt)
+
+            # 1. الانتظار حتى يبدأ التوليد (بحد أقصى 10 ثوانٍ)
+            start_time = time.time()
+            generation_started = False
+            while time.time() - start_time < 10.0:
+                for sel in config.STOP_SELECTORS:
+                    try:
+                        if await self.page.locator(sel).is_visible():
+                            generation_started = True
+                            break
+                    except Exception:
+                        pass
+                if generation_started:
+                    break
+                await asyncio.sleep(0.1)
+
+            last_length = 0
+            max_limit = time.time() + 600.0  # حد مرن أقصى 10 دقائق
+            full_captured = []
+
+            # 2. البث المباشر اللحظي أثناء قيام ChatGPT بالنتابة
+            while time.time() < max_limit:
+                current_text = await self.extract_response_snapshot()
+                if len(current_text) > last_length:
+                    new_chunk = current_text[last_length:]
+                    last_length = len(current_text)
+                    full_captured.append(new_chunk)
+                    yield new_chunk
+
+                is_generating = False
+                for sel in config.STOP_SELECTORS:
+                    try:
+                        if await self.page.locator(sel).is_visible():
+                            is_generating = True
+                            break
+                    except Exception:
+                        pass
+
+                if not is_generating:
+                    await asyncio.sleep(0.5)
+                    double_check = False
+                    for sel in config.STOP_SELECTORS:
+                        try:
+                            if await self.page.locator(sel).is_visible():
+                                double_check = True
+                                break
+                        except Exception:
+                            pass
+                    if not double_check:
+                        # الفحص النهائي واستخراج زر النسخ والحافظة بعد الاكتمال التام
+                        final_text = await self.extract_response()
+                        if final_text and len(final_text) > last_length:
+                            yield final_text[last_length:]
+                        elif not full_captured and final_text:
+                            yield final_text
+                        break
+
+                await asyncio.sleep(0.3)
+
+            self.capturer.reset()
+
     async def generate_chat_response(self, prompt: str) -> str:
         """إرسال الطلب مرة واحدة فقط واستخراج الرد فوراً مع تصفية وتطهير الذاكرة."""
         async with self.lock:
