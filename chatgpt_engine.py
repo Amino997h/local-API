@@ -195,11 +195,14 @@ class ChatGPTEngine:
         await self.page.keyboard.press("Enter")
 
     async def wait_for_generation_to_finish(self):
-        """الانتظار اللحظي المتابع لتوقف التوليد."""
+        """الانتظار الديناميكي المرن حتى اكتمال كتابة الرد بالكامل دون قطع أو مهلة زمنية ثانوية."""
+        logger.info("⏳ الانتظار الديناميكي لكتابة ChatGPT وتوليد الإجابة...")
+        
+        # 1. الانتظار حتى يبدأ التوليد (بحد أقصى 10 ثوانٍ لبدء الكتابة)
         start_time = time.time()
         generation_started = False
 
-        while time.time() - start_time < 5.0:
+        while time.time() - start_time < 10.0:
             for sel in config.STOP_SELECTORS:
                 try:
                     if await self.page.locator(sel).is_visible():
@@ -208,11 +211,14 @@ class ChatGPTEngine:
                 except Exception:
                     pass
             if generation_started:
+                logger.info("⚡ تم رصد بدء التوليد بنجاح (زر الإيقاف نشط).")
                 break
             await asyncio.sleep(0.1)
 
-        deadline = time.time() + config.RESPONSE_TIMEOUT_SECONDS
-        while time.time() < deadline:
+        # 2. الانتظار الديناميكي المستمر طالما أن زر الإيقاف موصول وChatGPT يكتب دون أي إيقاف قسري
+        max_dynamic_limit = time.time() + 600.0  # حد مرن ديناميكي حتى 10 دقائق للردود العملاقة
+
+        while time.time() < max_dynamic_limit:
             is_generating = False
             for sel in config.STOP_SELECTORS:
                 try:
@@ -223,19 +229,21 @@ class ChatGPTEngine:
                     pass
 
             if not is_generating:
-                break
-            await asyncio.sleep(0.1)
+                # التأكد لمدة 0.5 ثانية أن التوليد انتهى حقاً وليس توقفاً لحظياً
+                await asyncio.sleep(0.5)
+                double_check = False
+                for sel in config.STOP_SELECTORS:
+                    try:
+                        if await self.page.locator(sel).is_visible():
+                            double_check = True
+                            break
+                    except Exception:
+                        pass
+                if not double_check:
+                    logger.info("✅ اكتمل توليد الإجابة بالكامل من ChatGPT بنجاح.")
+                    break
 
-        if time.time() >= deadline:
-            logger.warning("تجاوز التوليد المهلة المحددة (120 ثانية). محاولة النقر على زر الإيقاف...")
-            for sel in config.STOP_SELECTORS:
-                try:
-                    btn = self.page.locator(sel).first
-                    if await btn.is_visible():
-                        await btn.evaluate("btn => btn.click()")
-                        break
-                except Exception:
-                    pass
+            await asyncio.sleep(0.2)
 
     async def extract_response(self) -> str:
         """
