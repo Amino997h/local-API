@@ -26,7 +26,7 @@ def cleanup_profile_locks(profile_dir: Path):
 
 
 class ChatGPTResponseCapturer:
-    """مستقبل الردود الذكي لـ ChatGPT عبر اعتراض شبكة الـ API."""
+    """مستقبل الردود الذكي لـ ChatGPT عبر اعتراض شبكة الـ API اللحظية."""
 
     def __init__(self):
         self.captured_text = ""
@@ -58,8 +58,7 @@ class ChatGPTResponseCapturer:
 
 class ChatGPTEngine:
     """
-    محرك أتمتة ChatGPT المرن والمدعوم باستراتيجيات استخراج متعددة
-    وآليات تعافي تلقائي عند الانهيار.
+    محرك أتمتة ChatGPT الفائق السرعة والمرن مع استجابة لحظية عند اكتمال التوليد.
     """
 
     def __init__(self):
@@ -83,7 +82,7 @@ class ChatGPTEngine:
         )
 
     async def initialize(self, headless: bool = False):
-        """تهيئة متصفح Playwright بسياق دائم مع آلية تنظيف الأقفال السابقة."""
+        """تهيئة متصفح Playwright بسياق دائم."""
         logger.info("جارٍ إطلاق سياق متصفح Playwright الدائم...")
         config.PROFILE_DIR.mkdir(parents=True, exist_ok=True)
         
@@ -95,28 +94,26 @@ class ChatGPTEngine:
             if "ProcessSingleton" in str(e) or "lock" in str(e).lower():
                 logger.warning("تنبيه: مجلد البروفايل مقفول بواسطة عملية سابقة. جارٍ محاولة إزالة القفل والإعادة...")
                 cleanup_profile_locks(config.PROFILE_DIR)
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.5)
                 self.context = await self._launch_context(headless)
             else:
                 raise e
 
-        # منح صلاحيات الحافظة مسبقاً
         await self.context.grant_permissions(["clipboard-read", "clipboard-write"])
 
         pages = self.context.pages
         self.page = pages[0] if pages else await self.context.new_page()
 
-        # إعداد مستمع استجابات الشبكة
         self.page.on("response", lambda resp: asyncio.create_task(self.capturer.handle_response(resp)))
 
         logger.info(f"التوجه إلى رابط ChatGPT: {config.CHATGPT_URL}")
         await self.page.goto(config.CHATGPT_URL, wait_until="domcontentloaded", timeout=config.TIMEOUT_MS)
-        await asyncio.sleep(2)
+        await asyncio.sleep(1)
         self._is_initialized = True
         logger.info("تمت تهيئة محرك ChatGPT بنجاح.")
 
     async def ensure_healthy_page(self):
-        """التحقق من صحة المتصفح وإعادة التشغيل التلقائي عند الانهيار."""
+        """التحقق السريع من صحة المتصفح."""
         try:
             if not self._is_initialized or not self.page or self.page.is_closed():
                 logger.warning("تنبيه: المتصفح مغلق أو غير مهيأ. جارٍ إعادة التشغيل التلقائي...")
@@ -130,21 +127,21 @@ class ChatGPTEngine:
             await self.initialize()
 
     async def get_prompt_box(self):
-        """البحث عن مربع كتابة الرسالة في ChatGPT."""
+        """البحث عن مربع كتابة الرسالة في ChatGPT بسرعة."""
         if not self.page:
             return None
 
         for selector in config.PROMPT_SELECTORS:
             try:
                 locator = self.page.locator(selector).first
-                if await locator.is_visible(timeout=2000):
+                if await locator.is_visible(timeout=500):
                     return locator
             except Exception:
                 continue
         return None
 
     async def send_prompt(self, prompt: str):
-        """إرسال البرومبت بمحاكاة أدوات الدخل ونظافة المربع."""
+        """إرسال البرومبت الفوري وتجاوز التأخيرات الكلاسيكية."""
         prompt_box = await self.get_prompt_box()
 
         if prompt_box is None:
@@ -153,21 +150,22 @@ class ChatGPTEngine:
             )
 
         await prompt_box.click()
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(0.05)
 
-        # مسح أي نص قديم في مربع الإدخال
+        # مسح أي نص قديم بسرعة
         await self.page.keyboard.press("Control+A")
         await self.page.keyboard.press("Backspace")
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(0.05)
 
         await self.page.keyboard.insert_text(prompt)
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.1)
 
+        # محاولة الضغط السريع على زر الإرسال أو Enter
         send_button = None
         for sel in config.SEND_BUTTON_SELECTORS:
             btn = self.page.locator(sel).first
             try:
-                if await btn.is_visible(timeout=1000) and await btn.is_enabled():
+                if await btn.is_visible(timeout=300) and await btn.is_enabled():
                     send_button = btn
                     break
             except Exception:
@@ -183,33 +181,42 @@ class ChatGPTEngine:
         await self.page.keyboard.press("Enter")
 
     async def wait_for_generation_to_finish(self):
-        """الانتظار حتى يكتمل التوليد عبر متابعة زر التوقف."""
+        """
+        الانتظار اللحظي (Sub-second polling):
+        التحقق كل 100 ملي ثانية حتى يظهر زر الإيقاف ثم يختفي، بدون أية تأخيرات ثابتة!
+        """
         start_time = time.time()
-        
-        while time.time() - start_time < 12:
+        generation_started = False
+
+        # 1. فحص ظهور زر Stop بسرعة (خلال أول 5 ثوانٍ بحد أقصى)
+        while time.time() - start_time < 5.0:
             for sel in config.STOP_SELECTORS:
                 try:
                     if await self.page.locator(sel).is_visible():
+                        generation_started = True
                         break
                 except Exception:
                     pass
-            await asyncio.sleep(0.5)
+            if generation_started:
+                break
+            await asyncio.sleep(0.1) # فحص كل 100ms
 
+        # 2. متابعة اكتمال التوليد حتى يختفي زر Stop فوراً
         deadline = time.time() + config.RESPONSE_TIMEOUT_SECONDS
         while time.time() < deadline:
-            generating = False
+            is_generating = False
             for sel in config.STOP_SELECTORS:
                 try:
                     if await self.page.locator(sel).is_visible():
-                        generating = True
+                        is_generating = True
                         break
                 except Exception:
                     pass
 
-            if not generating:
-                await asyncio.sleep(1.5)
+            # بمجرد اختفاء زر Stop: اكتمل التوليد فوراً! نخرج مباشرة بدون انتظار!
+            if not is_generating:
                 break
-            await asyncio.sleep(0.8)
+            await asyncio.sleep(0.1) # فحص دقيق كل 100ms
 
         if time.time() >= deadline:
             logger.warning("تجاوز التوليد المهلة المحددة (120 ثانية). محاولة النقر على زر الإيقاف...")
@@ -224,18 +231,17 @@ class ChatGPTEngine:
 
     async def extract_response(self) -> str:
         """
-        الاستراتيجية المبتكرة لاستخراج النص المحسنة لتركيز الصفحة والـ DOM المعاصر:
-        1. إحضار النافذة إلى المقدمة (bring to front)
-        2. زر النسخ المباشر والحافظة
-        3. اعتراض حزم البيانات من الشبكة
-        4. مسح DOM المتقدم للرابط والمساعد
+        استخراج النص اللحظي (0-delay extraction):
+        1. فحص نص الشبكة الملتقط فوراً (0ms)
+        2. فحص زر النسخ المباشر
+        3. فحص الـ DOM لجلب أحدث رد مساعد
         """
-        try:
-            await self.page.bring_to_front()
-        except Exception:
-            pass
+        # ─── 🥇 1. اعتراض شبكة الـ API اللحظية (الأسرع على الإطلاق) ───
+        if self.capturer.captured_text and self.capturer.captured_text.strip():
+            logger.info("⚡ تم جلب الرد لحظياً عبر (اعتراض شبكة الـ API).")
+            return self.capturer.captured_text.strip()
 
-        # ─── 🥇 1. تقنية زر النسخ المباشر والحافظة ───
+        # ─── 🥈 2. تقنية زر النسخ المباشر والحافظة ───
         try:
             copy_buttons = self.page.locator(', '.join(config.COPY_BUTTON_SELECTORS))
             count = await copy_buttons.count()
@@ -243,24 +249,18 @@ class ChatGPTEngine:
                 last_copy_btn = copy_buttons.nth(count - 1)
                 if await last_copy_btn.is_visible():
                     await last_copy_btn.click()
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(0.1)
                     clipboard_text = await self.page.evaluate("navigator.clipboard.readText()")
                     if clipboard_text and clipboard_text.strip():
-                        logger.info("📌 تم جلب الرد بنجاح عبر (تقنية زر النسخ المباشر والحافظة).")
+                        logger.info("📌 تم جلب الرد بنجاح عبر (زر النسخ المباشر والحافظة).")
                         return clipboard_text.strip()
         except Exception as e:
             logger.debug(f"(تنبيه محاولة النسخ): {e}")
 
-        # ─── 🥈 2. اعتراض شبكة الـ API ───
-        if self.capturer.captured_text and self.capturer.captured_text.strip():
-            logger.info("📌 تم جلب الرد بنجاح عبر (اعتراض حزم بيانات الـ API).")
-            return self.capturer.captured_text.strip()
-
-        # ─── 🥉 3. المسح الذكي لـ DOM عبر JS الشامل ───
+        # ─── 🥉 3. المسح الذكي لـ DOM عبر JS اللحظي ───
         try:
             js_extracted = await self.page.evaluate("""
                 () => {
-                    // البحث في عناصر ردود المساعد المخصصة
                     const assistantNodes = document.querySelectorAll('[data-message-author-role="assistant"], [data-testid*="assistant"], article');
                     if (assistantNodes.length > 0) {
                         const lastNode = assistantNodes[assistantNodes.length - 1];
@@ -315,7 +315,7 @@ class ChatGPTEngine:
         return ""
 
     async def generate_chat_response(self, prompt: str) -> str:
-        """إرسال الطلب واستخراج الرد مع استخدام asyncio.Lock لضمان التزامن."""
+        """إرسال الطلب واستخراج الرد فوراً مع استخدام asyncio.Lock."""
         async with self.lock:
             await self.ensure_healthy_page()
 
@@ -330,13 +330,13 @@ class ChatGPTEngine:
                     if response_text:
                         return response_text
                     
-                    logger.warning(f"محاولة استخراج فارغة ({attempt}/{config.MAX_EXTRACTION_ATTEMPTS})، إعادة محاولة الاستخراج...")
-                    await asyncio.sleep(1)
+                    logger.warning(f"محاولة استخراج فارغة ({attempt}/{config.MAX_EXTRACTION_ATTEMPTS})، إعادة المحاولة...")
+                    await asyncio.sleep(0.2)
                 except Exception as e:
                     logger.error(f"خطأ خلال تنفيذ البرومبت (المحاولة {attempt}): {e}")
                     if attempt == config.MAX_EXTRACTION_ATTEMPTS:
                         raise e
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(0.2)
 
             raise RuntimeError("فشل استخراج أي نص من ChatGPT بعد عدة محاولات.")
 
