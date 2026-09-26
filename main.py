@@ -150,7 +150,7 @@ async def create_chat_completion(
     """
     نقطة النهاية الرئيسية المحاكية لـ OpenAI Chat Completions.
     تتلقى الرسائل وتدمج السياق الكامل ثم ترسله إلى ChatGPT وتسترجع الرد.
-    تكتشف الطلبات التلقائية الثانوية مثل (توليد عنوان المحادثة) وتعالجها فوراً بـ 0ms.
+    تكتشف الطلبات التلقائية الثانوية مثل (توليد العنوان واستخراج الذاكرة) وتُجيب عليها فوراً بـ 0ms محلياً.
     """
     if not request.messages:
         raise HTTPException(status_code=400, detail="مصفوفة الرسائل messages لا يمكن أن تكون فارغة.")
@@ -170,12 +170,13 @@ async def create_chat_completion(
             formatted_parts.append(f"[{msg.role.upper()}]:\n{content}")
 
     full_prompt = "\n\n".join(formatted_parts)
+    full_prompt_lower = full_prompt.lower()
 
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
     created_timestamp = int(time.time())
 
-    # ⚡ الذكاء الخاطف: رصد طلبات تسمية شريط المحادثة الجانبي التلقائية (Auto-Title Generation)
-    if "generate a short title" in full_prompt.lower() or "generate a title" in full_prompt.lower():
+    # ⚡ 1. رصد طلبات تسمية شريط المحادثة التلقائية (Auto-Title Generation)
+    if "generate a short title" in full_prompt_lower or "generate a title" in full_prompt_lower:
         logger.info("⚡ رصد طلب تلقائي لتسمية المحادثة (Auto-Title Request) - إرجاع عنوان سريع محلياً بـ 0ms بدون إرساله لـ ChatGPT.")
         user_snippet = ""
         for m in request.messages:
@@ -183,6 +184,13 @@ async def create_chat_completion(
                 user_snippet = str(m.content).strip()
                 break
         reply_text = user_snippet[:35] if user_snippet else "محادثة جديدة"
+
+    # ⚡ 2. رصد طلبات تحليل الذاكرة واستخراج الحقائق الخلفية (Memory Extraction)
+    elif "memory extraction assistant" in full_prompt_lower or "durable personal facts" in full_prompt_lower or "extract durable" in full_prompt_lower:
+        logger.info("⚡ رصد طلب تلقائي لاستخراج الذاكرة (Memory Extraction Request) - إرجاع '[]' محلياً بـ 0ms بدون إرساله لـ ChatGPT.")
+        reply_text = "[]"
+
+    # 🚀 3. الطلب الحقيقي الموجه لـ ChatGPT
     else:
         logger.info(f"استلام طلب جيل جديد ({len(request.messages)} رسائل، Stream={request.stream}). البرومبت: '{full_prompt[:80]}...'")
 
