@@ -58,7 +58,7 @@ class ChatGPTResponseCapturer:
 
 class ChatGPTEngine:
     """
-    محرك أتمتة ChatGPT الفائق السرعة والمرن مع استجابة لحظية عند اكتمال التوليد.
+    محرك أتمتة ChatGPT الفائق السرعة والمرن مع استجابة لحظية ومنع التمرير التلقائي.
     """
 
     def __init__(self):
@@ -141,7 +141,7 @@ class ChatGPTEngine:
         return None
 
     async def send_prompt(self, prompt: str):
-        """إرسال البرومبت الفوري وتجاوز التأخيرات الكلاسيكية."""
+        """إرسال البرومبت الفوري بدون تمرير القفز التلقائي."""
         prompt_box = await self.get_prompt_box()
 
         if prompt_box is None:
@@ -149,7 +149,8 @@ class ChatGPTEngine:
                 "لم يتم العثور على مربع كتابة الرسالة في ChatGPT. قد يكون هناك تحقق (CAPTCHA) أو يتطلب تسجيل الدخول."
             )
 
-        await prompt_box.click()
+        # التركيز والنقر عبر evaluate لتجنب قفز التمرير scrollIntoView
+        await prompt_box.evaluate("el => el.focus()")
         await asyncio.sleep(0.05)
 
         # مسح أي نص قديم بسرعة
@@ -160,7 +161,6 @@ class ChatGPTEngine:
         await self.page.keyboard.insert_text(prompt)
         await asyncio.sleep(0.1)
 
-        # محاولة الضغط السريع على زر الإرسال أو Enter
         send_button = None
         for sel in config.SEND_BUTTON_SELECTORS:
             btn = self.page.locator(sel).first
@@ -173,7 +173,8 @@ class ChatGPTEngine:
 
         if send_button:
             try:
-                await send_button.click()
+                # استخدام JS click لمنع قفزة الشاشة
+                await send_button.evaluate("btn => btn.click()")
                 return
             except Exception:
                 pass
@@ -181,14 +182,10 @@ class ChatGPTEngine:
         await self.page.keyboard.press("Enter")
 
     async def wait_for_generation_to_finish(self):
-        """
-        الانتظار اللحظي (Sub-second polling):
-        التحقق كل 100 ملي ثانية حتى يظهر زر الإيقاف ثم يختفي، بدون أية تأخيرات ثابتة!
-        """
+        """الانتظار اللحظي المتابع لتوقف التوليد."""
         start_time = time.time()
         generation_started = False
 
-        # 1. فحص ظهور زر Stop بسرعة (خلال أول 5 ثوانٍ بحد أقصى)
         while time.time() - start_time < 5.0:
             for sel in config.STOP_SELECTORS:
                 try:
@@ -199,9 +196,8 @@ class ChatGPTEngine:
                     pass
             if generation_started:
                 break
-            await asyncio.sleep(0.1) # فحص كل 100ms
+            await asyncio.sleep(0.1)
 
-        # 2. متابعة اكتمال التوليد حتى يختفي زر Stop فوراً
         deadline = time.time() + config.RESPONSE_TIMEOUT_SECONDS
         while time.time() < deadline:
             is_generating = False
@@ -213,10 +209,9 @@ class ChatGPTEngine:
                 except Exception:
                     pass
 
-            # بمجرد اختفاء زر Stop: اكتمل التوليد فوراً! نخرج مباشرة بدون انتظار!
             if not is_generating:
                 break
-            await asyncio.sleep(0.1) # فحص دقيق كل 100ms
+            await asyncio.sleep(0.1)
 
         if time.time() >= deadline:
             logger.warning("تجاوز التوليد المهلة المحددة (120 ثانية). محاولة النقر على زر الإيقاف...")
@@ -224,31 +219,32 @@ class ChatGPTEngine:
                 try:
                     btn = self.page.locator(sel).first
                     if await btn.is_visible():
-                        await btn.click()
+                        await btn.evaluate("btn => btn.click()")
                         break
                 except Exception:
                     pass
 
     async def extract_response(self) -> str:
         """
-        استخراج النص اللحظي (0-delay extraction):
+        استخراج النص اللحظي مع منع قفز شريط التمرير (No Scroll Jumps):
         1. فحص نص الشبكة الملتقط فوراً (0ms)
-        2. فحص زر النسخ المباشر
-        3. فحص الـ DOM لجلب أحدث رد مساعد
+        2. فحص زر النسخ عبر JS DOM دون تحريك الشاشة
+        3. مسح DOM المباشر عبر JS
         """
-        # ─── 🥇 1. اعتراض شبكة الـ API اللحظية (الأسرع على الإطلاق) ───
+        # ─── 🥇 1. اعتراض شبكة الـ API اللحظية ───
         if self.capturer.captured_text and self.capturer.captured_text.strip():
             logger.info("⚡ تم جلب الرد لحظياً عبر (اعتراض شبكة الـ API).")
             return self.capturer.captured_text.strip()
 
-        # ─── 🥈 2. تقنية زر النسخ المباشر والحافظة ───
+        # ─── 🥈 2. تقنية زر النسخ عبر JS النظيف دون تحريك الشاشة ───
         try:
             copy_buttons = self.page.locator(', '.join(config.COPY_BUTTON_SELECTORS))
             count = await copy_buttons.count()
             if count > 0:
                 last_copy_btn = copy_buttons.nth(count - 1)
                 if await last_copy_btn.is_visible():
-                    await last_copy_btn.click()
+                    # استخدام JS click يمنع سحب الشاشة لأعلى ولأسفل
+                    await last_copy_btn.evaluate("btn => btn.click()")
                     await asyncio.sleep(0.1)
                     clipboard_text = await self.page.evaluate("navigator.clipboard.readText()")
                     if clipboard_text and clipboard_text.strip():
