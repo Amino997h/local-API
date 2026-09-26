@@ -150,12 +150,12 @@ async def create_chat_completion(
     """
     نقطة النهاية الرئيسية المحاكية لـ OpenAI Chat Completions.
     تتلقى الرسائل وتدمج السياق الكامل ثم ترسله إلى ChatGPT وتسترجع الرد.
-    تدعم الرد المباشر (JSON) والرد البثي (SSE Stream).
+    تكتشف الطلبات التلقائية الثانوية مثل (توليد عنوان المحادثة) وتعالجها فوراً بـ 0ms.
     """
     if not request.messages:
         raise HTTPException(status_code=400, detail="مصفوفة الرسائل messages لا يمكن أن تكون فارغة.")
 
-    # تجميع جميع الرسائل (System + History + User) في برومبت موحد لـ ChatGPT
+    # تجميع جميع الرسائل في برومبت موحد
     formatted_parts = []
     for msg in request.messages:
         content = msg.content
@@ -171,25 +171,35 @@ async def create_chat_completion(
 
     full_prompt = "\n\n".join(formatted_parts)
 
-    logger.info(f"استلام طلب جيل جديد ({len(request.messages)} رسائل، Stream={request.stream}). البرومبت: '{full_prompt[:80]}...'")
-
-    try:
-        reply_text = await engine.generate_chat_response(full_prompt)
-    except RuntimeError as r_err:
-        logger.error(f"خطأ في جلسة ChatGPT: {r_err}")
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"ChatGPT session error or intervention required: {str(r_err)}",
-        )
-    except Exception as e:
-        logger.error(f"خطأ غير متوقع أثناء المعالجة: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Internal Server Error: {str(e)}",
-        )
-
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
     created_timestamp = int(time.time())
+
+    # ⚡ الذكاء الخاطف: رصد طلبات تسمية شريط المحادثة الجانبي التلقائية (Auto-Title Generation)
+    if "generate a short title" in full_prompt.lower() or "generate a title" in full_prompt.lower():
+        logger.info("⚡ رصد طلب تلقائي لتسمية المحادثة (Auto-Title Request) - إرجاع عنوان سريع محلياً بـ 0ms بدون إرساله لـ ChatGPT.")
+        user_snippet = ""
+        for m in request.messages:
+            if m.role == "user" and m.content:
+                user_snippet = str(m.content).strip()
+                break
+        reply_text = user_snippet[:35] if user_snippet else "محادثة جديدة"
+    else:
+        logger.info(f"استلام طلب جيل جديد ({len(request.messages)} رسائل، Stream={request.stream}). البرومبت: '{full_prompt[:80]}...'")
+
+        try:
+            reply_text = await engine.generate_chat_response(full_prompt)
+        except RuntimeError as r_err:
+            logger.error(f"خطأ في جلسة ChatGPT: {r_err}")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"ChatGPT session error or intervention required: {str(r_err)}",
+            )
+        except Exception as e:
+            logger.error(f"خطأ غير متوقع أثناء المعالجة: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Internal Server Error: {str(e)}",
+            )
 
     logger.info(f"📤 الرد الجاهز للإرسال (الطول: {len(reply_text)} حرف): '{reply_text[:100]}...'")
 
