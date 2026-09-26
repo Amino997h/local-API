@@ -140,17 +140,16 @@ def format_clean_prompt(messages: List[ChatMessage]) -> str:
                 parts = clean_text.split("<<<END_UNTRUSTED_SOURCE_DATA>>>")
                 clean_text = parts[-1] if len(parts) > 1 else clean_text
 
-            # استخراج التاريخ إن وجد
+            # استخراج التاريخ إن وجد دون اقتطاع باقي البرومبت النهائي
             if "[Context — current date/time" in content_str:
                 lines = clean_text.split("\n")
                 date_lines = [l.strip() for l in lines if "Today is" in l or "User local time" in l]
                 if date_lines:
                     date_context = " | ".join(date_lines)
                 
-                # استخراج آخر سطر نصي غير فارغ يعبر عن طلب المستخدم
-                non_empty = [l.strip() for l in lines if l.strip() and not l.strip().startswith("#") and not l.strip().startswith("[Context")]
-                if non_empty:
-                    clean_text = non_empty[-1]
+                # الاحتفاظ بكافة أسطر الطلب واستبعاد أسطر السياق فقط
+                prompt_lines = [l for l in lines if not l.strip().startswith("[Context") and not l.strip().startswith("# Context")]
+                clean_text = "\n".join(prompt_lines)
 
             latest_user_text = clean_text.strip()
             if latest_user_text:
